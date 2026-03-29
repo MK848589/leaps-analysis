@@ -69,6 +69,36 @@ def run_backtest(df):
         signal_bar   = signal_bars.iloc[0]
         stack        = classify_stack(signal_bar)
         signal_price = to_scalar(signal_bar['Close'])
+        signal_open  = to_scalar(signal_bar['Open'])
+        signal_low   = to_scalar(signal_bar['Low'])
+
+        # ── Continuation filters ─────────────────────────────────────────────
+
+        # 1. Drop from open: how much has price already moved by 10:30?
+        open_bar      = day_df[day_df.index.time < time(9, 35)]
+        day_open      = to_scalar(open_bar['Open'].iloc[0]) if not open_bar.empty else signal_price
+        open_to_signal_pct = ((signal_price - day_open) / day_open) * 100
+
+        # 2. First-hour direction: was price still falling into the signal bar?
+        #    Compare 10:00 AM close to 10:30 AM close
+        bar_1000 = day_df[
+            (day_df.index.time >= time(10, 0)) &
+            (day_df.index.time < time(10, 5))
+        ]
+        price_1000 = to_scalar(bar_1000['Close'].iloc[0]) if not bar_1000.empty else signal_price
+        still_falling = signal_price < price_1000   # bearish: price lower at 10:30 than 10:00
+        still_rising  = signal_price > price_1000   # bullish: price higher at 10:30 than 10:00
+
+        # 3. New intraday low at signal: 10:30 bar low < all lows since open
+        pre_signal = day_df[day_df.index.time < SIGNAL_TIME]
+        prior_low  = to_scalar(pre_signal['Low'].min()) if not pre_signal.empty else signal_low
+        prior_high = to_scalar(pre_signal['High'].max()) if not pre_signal.empty else signal_open
+        is_new_low  = signal_low  <= prior_low   # bearish continuation
+        is_new_high = to_scalar(signal_bar['High']) >= prior_high  # bullish continuation
+
+        # 4. Signal bar direction: is the 10:30 bar itself red (bearish) or green?
+        signal_bar_red   = signal_price < signal_open
+        signal_bar_green = signal_price > signal_open
 
         # ── Measure price action after signal ────────────────────────────────
         post_signal = day_df[
@@ -89,29 +119,40 @@ def run_backtest(df):
 
         # ── Did trend continue in expected direction? ─────────────────────────
         if stack == 'bearish':
-            trend_continued = price_change < 0
-            max_favorable   = max_move_down
+            trend_continued   = price_change < 0
+            max_favorable     = max_move_down
+            # Continuation filter: still falling + new low + red bar + not exhausted (drop < 2%)
+            continuation_pass = (still_falling and is_new_low and signal_bar_red
+                                  and open_to_signal_pct > -2.0)
         elif stack == 'bullish':
-            trend_continued = price_change > 0
-            max_favorable   = max_move_up
+            trend_continued   = price_change > 0
+            max_favorable     = max_move_up
+            continuation_pass = (still_rising and is_new_high and signal_bar_green
+                                  and open_to_signal_pct < 2.0)
         else:
-            trend_continued = None
-            max_favorable   = None
+            trend_continued   = None
+            max_favorable     = None
+            continuation_pass = False
 
         results.append({
-            'date'             : date,
-            'stack'            : stack,
-            'signal_price'     : round(signal_price, 2),
-            'end_price'        : round(end_price, 2),
-            'price_change'     : round(price_change, 2),
-            'price_change_pct' : round(price_change_pct, 2),
-            'max_move_up_pct'  : round(max_move_up, 2),
-            'max_move_down_pct': round(max_move_down, 2),
-            'max_favorable_pct': round(max_favorable, 2) if max_favorable is not None else None,
-            'trend_continued'  : trend_continued,
-            'ema9'             : round(to_scalar(signal_bar['EMA9']),   2),
-            'ema48'            : round(to_scalar(signal_bar['EMA48']),  2),
-            'ema200'           : round(to_scalar(signal_bar['EMA200']), 2),
+            'date'                : date,
+            'stack'               : stack,
+            'signal_price'        : round(signal_price, 2),
+            'end_price'           : round(end_price, 2),
+            'price_change'        : round(price_change, 2),
+            'price_change_pct'    : round(price_change_pct, 2),
+            'max_move_up_pct'     : round(max_move_up, 2),
+            'max_move_down_pct'   : round(max_move_down, 2),
+            'max_favorable_pct'   : round(max_favorable, 2) if max_favorable is not None else None,
+            'trend_continued'     : trend_continued,
+            'continuation_pass'   : continuation_pass,
+            'open_to_signal_pct'  : round(open_to_signal_pct, 2),
+            'still_falling'       : still_falling,
+            'is_new_low'          : is_new_low,
+            'signal_bar_red'      : signal_bar_red,
+            'ema9'                : round(to_scalar(signal_bar['EMA9']),   2),
+            'ema48'               : round(to_scalar(signal_bar['EMA48']),  2),
+            'ema200'              : round(to_scalar(signal_bar['EMA200']), 2),
         })
 
     return pd.DataFrame(results)
@@ -133,34 +174,42 @@ def print_summary(results_df):
         print(f"\n── {stack_type.upper()} STACK ({len(subset)} days) ──────────────")
 
         if stack_type != 'neutral':
-            fav         = subset['max_favorable_pct'].abs()
-            adv         = subset['max_move_up_pct'].abs() if stack_type == 'bearish' else subset['max_move_down_pct'].abs()
-            winners     = subset[subset['trend_continued'] == True]
-            win_rate    = len(winners) / len(subset) * 100
-            avg_move    = subset['price_change_pct'].mean()
-            avg_fav     = subset['max_favorable_pct'].mean()
-            avg_unfav   = subset['max_move_up_pct'].mean() if stack_type == 'bearish' else subset['max_move_down_pct'].mean()
+            def stack_stats(s, label):
+                if s.empty:
+                    print(f"  [{label}] No days match.")
+                    return
+                fav     = s['max_favorable_pct'].abs()
+                adv     = s['max_move_up_pct'].abs() if stack_type == 'bearish' else s['max_move_down_pct'].abs()
+                wr_eod  = (s['trend_continued'] == True).sum() / len(s) * 100
+                wr_50   = (fav >= 0.50).sum() / len(s) * 100
+                wr_75   = (fav >= 0.75).sum() / len(s) * 100
+                wr_100  = (fav >= 1.00).sum() / len(s) * 100
+                wr_150  = (fav >= 1.50).sum() / len(s) * 100
+                wr_rr   = (fav > adv).sum()   / len(s) * 100
+                print(f"  [{label}]  n={len(s)}")
+                print(f"    Win rate (EOD direction):  {wr_eod:.0f}%")
+                print(f"    Win rate (fav ≥ 0.50%):    {wr_50:.0f}%")
+                print(f"    Win rate (fav ≥ 0.75%):    {wr_75:.0f}%")
+                print(f"    Win rate (fav ≥ 1.00%):    {wr_100:.0f}%")
+                print(f"    Win rate (fav ≥ 1.50%):    {wr_150:.0f}%")
+                print(f"    Win rate (fav > adverse):  {wr_rr:.0f}%")
+                print(f"    Avg max favorable:         {s['max_favorable_pct'].mean():.2f}%")
+                print(f"    Avg EOD move:              {s['price_change_pct'].mean():.2f}%")
 
-            # Multi-threshold win rates
-            wr_50  = (fav >= 0.50).sum() / len(subset) * 100
-            wr_75  = (fav >= 0.75).sum() / len(subset) * 100
-            wr_100 = (fav >= 1.00).sum() / len(subset) * 100
-            wr_150 = (fav >= 1.50).sum() / len(subset) * 100
-            wr_rr  = (fav > adv).sum()   / len(subset) * 100   # favorable > adverse
+            stack_stats(subset, "ALL days")
+            filtered = subset[subset['continuation_pass'] == True]
+            print(f"  ── Continuation filters: still falling + new low + red bar + drop<2% ──")
+            stack_stats(filtered, "FILTERED days")
 
-            print(f"  Win rate (EOD direction):    {win_rate:.1f}%")
-            print(f"  Win rate (fav ≥ 0.50%):      {wr_50:.1f}%")
-            print(f"  Win rate (fav ≥ 0.75%):      {wr_75:.1f}%")
-            print(f"  Win rate (fav ≥ 1.00%):      {wr_100:.1f}%")
-            print(f"  Win rate (fav ≥ 1.50%):      {wr_150:.1f}%")
-            print(f"  Win rate (fav > adverse):    {wr_rr:.1f}%")
-            print(f"  ─")
-            print(f"  Avg price change by 3:30pm:  {avg_move:.2f}%")
-            print(f"  Avg max favorable move:      {avg_fav:.2f}%")
-            print(f"  Avg max adverse move:        {avg_unfav:.2f}%")
-            print(f"  Max single-day favorable:    {fav.max():.2f}%")
-            print(f"  Best EOD:                    {subset['price_change_pct'].min() if stack_type == 'bearish' else subset['price_change_pct'].max():.2f}%")
-            print(f"  Worst EOD:                   {subset['price_change_pct'].max() if stack_type == 'bearish' else subset['price_change_pct'].min():.2f}%")
+            # Per-filter breakdown to show which filters help most
+            if stack_type == 'bearish' and len(subset) > 0:
+                n = len(subset)
+                print(f"  ── Individual filter pass rates ──")
+                print(f"    Still falling (10:00→10:30): {subset['still_falling'].sum()}/{n} ({subset['still_falling'].mean()*100:.0f}%)")
+                print(f"    New intraday low at 10:30:   {subset['is_new_low'].sum()}/{n} ({subset['is_new_low'].mean()*100:.0f}%)")
+                print(f"    Signal bar is red:           {subset['signal_bar_red'].sum()}/{n} ({subset['signal_bar_red'].mean()*100:.0f}%)")
+                not_exhausted = (subset['open_to_signal_pct'] > -2.0).sum()
+                print(f"    Drop from open < 2%:         {not_exhausted}/{n} ({not_exhausted/n*100:.0f}%)")
         else:
             print(f"  Avg price change by 3:30pm:  {subset['price_change_pct'].mean():.2f}%")
 
