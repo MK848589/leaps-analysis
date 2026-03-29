@@ -36,11 +36,15 @@ def add_emas(df):
     df['EMA200'] = df['Close'].ewm(span=EMA_LONG,  adjust=False).mean()
     return df
 
+def to_scalar(val):
+    """Safely extract a Python float from any pandas/numpy scalar, Series, or array."""
+    return float(np.array(val).flat[0])
+
 def classify_stack(row):
     """Returns 'bearish', 'bullish', or 'neutral' based on EMA order."""
-    e9   = float(row['EMA9'].iloc[0])   if hasattr(row['EMA9'],   'iloc') else float(row['EMA9'])
-    e48  = float(row['EMA48'].iloc[0])  if hasattr(row['EMA48'],  'iloc') else float(row['EMA48'])
-    e200 = float(row['EMA200'].iloc[0]) if hasattr(row['EMA200'], 'iloc') else float(row['EMA200'])
+    e9   = to_scalar(row['EMA9'])
+    e48  = to_scalar(row['EMA48'])
+    e200 = to_scalar(row['EMA200'])
     if e9 < e48 < e200:
         return 'bearish'
     elif e9 > e48 > e200:
@@ -63,7 +67,7 @@ def run_backtest(df):
 
         signal_bar   = signal_bars.iloc[0]
         stack        = classify_stack(signal_bar)
-        signal_price = float(signal_bar['Close'].iloc[0] if hasattr(signal_bar['Close'], 'iloc') else signal_bar['Close'])
+        signal_price = to_scalar(signal_bar['Close'])
 
         # ── Measure price action after signal ────────────────────────────────
         post_signal = day_df[
@@ -104,9 +108,9 @@ def run_backtest(df):
             'max_move_down_pct': round(max_move_down, 2),
             'max_favorable_pct': round(max_favorable, 2) if max_favorable is not None else None,
             'trend_continued'  : trend_continued,
-            'ema9'             : round(float(signal_bar['EMA9'].iloc[0] if hasattr(signal_bar['EMA9'], 'iloc') else signal_bar['EMA9']), 2),
-            'ema48'            : round(float(signal_bar['EMA48'].iloc[0] if hasattr(signal_bar['EMA48'], 'iloc') else signal_bar['EMA48']), 2),
-            'ema200'           : round(float(signal_bar['EMA200'].iloc[0] if hasattr(signal_bar['EMA200'], 'iloc') else signal_bar['EMA200']), 2),
+            'ema9'             : round(to_scalar(signal_bar['EMA9']),   2),
+            'ema48'            : round(to_scalar(signal_bar['EMA48']),  2),
+            'ema200'           : round(to_scalar(signal_bar['EMA200']), 2),
         })
 
     return pd.DataFrame(results)
