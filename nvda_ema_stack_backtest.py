@@ -22,6 +22,7 @@ def get_data(ticker, period, interval):
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    df = df.loc[:, ~df.columns.duplicated()]   # drop duplicate cols from MultiIndex flatten
     df.index = pd.to_datetime(df.index)
     if df.index.tz is None:
         df.index = df.index.tz_localize('America/New_York')
@@ -77,9 +78,9 @@ def run_backtest(df):
         if post_signal.empty:
             continue
 
-        end_price  = float(post_signal['Close'].iloc[-1])
-        high_price = float(post_signal['High'].max())
-        low_price  = float(post_signal['Low'].min())
+        end_price  = to_scalar(post_signal['Close'].iloc[-1])
+        high_price = to_scalar(post_signal['High'].max())
+        low_price  = to_scalar(post_signal['Low'].min())
 
         price_change     = end_price - signal_price
         price_change_pct = (price_change / signal_price) * 100
