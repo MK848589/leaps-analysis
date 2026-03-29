@@ -228,28 +228,28 @@ def print_summary(results_df):
 
 def find_ema_rejections(df):
     """
-    On bearish stack days: scan post-10:30 bars for price touching EMA9 or EMA48
-    from below (high >= EMA) but closing below it (close < EMA).
-    That failed cross = rejection entry. Measure outcome to 3:30 PM.
+    BEARISH stack days: price bounces into EMA9/48 from below, closes under → short entry.
+    BULLISH stack days: price dips into EMA9/48 from above, closes back above → long entry.
+    Scan post-10:30 bars for first occurrence each day.
     """
     rejections = []
     trading_days = df.groupby(df.index.date)
 
     for date, day_df in trading_days:
-        # Confirm bearish stack at 10:30
         signal_bars = day_df[
             (day_df.index.time >= SIGNAL_TIME) &
             (day_df.index.time < time(10, 35))
         ]
         if signal_bars.empty:
             continue
-        if classify_stack(signal_bars.iloc[0]) != 'bearish':
+
+        stack = classify_stack(signal_bars.iloc[0])
+        if stack not in ('bearish', 'bullish'):
             continue
 
-        # Scan every bar after 10:30 for first EMA9 or EMA48 rejection
         post = day_df[
             (day_df.index.time > SIGNAL_TIME) &
-            (day_df.index.time <= time(14, 30))   # latest entry 2:30 PM
+            (day_df.index.time <= time(14, 30))
         ]
 
         rejection_bar = None
@@ -257,34 +257,40 @@ def find_ema_rejections(df):
 
         for bar_time, bar in post.iterrows():
             hi    = to_scalar(bar['High'])
+            lo    = to_scalar(bar['Low'])
             close = to_scalar(bar['Close'])
             e9    = to_scalar(bar['EMA9'])
             e48   = to_scalar(bar['EMA48'])
 
-            # EMA48 rejection takes priority (stronger signal — further away)
-            if hi >= e48 and close < e48:
-                rejection_bar = bar
-                rejection_ema = 'EMA48'
-                break
-            elif hi >= e9 and close < e9:
-                rejection_bar = bar
-                rejection_ema = 'EMA9'
-                break
+            if stack == 'bearish':
+                # Price touched EMA from below but closed under it → resistance confirmed
+                if hi >= e48 and close < e48:
+                    rejection_bar, rejection_ema = bar, 'EMA48'
+                    break
+                elif hi >= e9 and close < e9:
+                    rejection_bar, rejection_ema = bar, 'EMA9'
+                    break
+            else:  # bullish
+                # Price dipped into EMA from above but closed back above → support confirmed
+                if lo <= e48 and close > e48:
+                    rejection_bar, rejection_ema = bar, 'EMA48'
+                    break
+                elif lo <= e9 and close > e9:
+                    rejection_bar, rejection_ema = bar, 'EMA9'
+                    break
 
         if rejection_bar is None:
             rejections.append({
-                'date': date, 'rejection_found': False,
-                'rejection_ema': None, 'entry_time': None,
-                'entry_price': None, 'max_favorable_pct': None,
-                'eod_pct': None, 'trend_continued': None,
-                'hit_050': None, 'hit_075': None, 'hit_100': None,
+                'date': date, 'stack': stack, 'rejection_found': False,
+                'rejection_ema': None, 'entry_time': None, 'entry_price': None,
+                'max_favorable_pct': None, 'eod_pct': None,
+                'trend_continued': None, 'hit_050': None, 'hit_075': None, 'hit_100': None,
             })
             continue
 
         entry_price = to_scalar(rejection_bar['Close'])
         entry_time  = bar_time.time()
 
-        # Measure from entry bar close to 3:30 PM
         after_entry = day_df[
             (day_df.index.time > entry_time) &
             (day_df.index.time <= TRADE_END_TIME)
@@ -292,84 +298,106 @@ def find_ema_rejections(df):
         if after_entry.empty:
             continue
 
-        eod_price  = to_scalar(after_entry['Close'].iloc[-1])
-        low_after  = to_scalar(after_entry['Low'].min())
-        eod_pct    = ((eod_price - entry_price) / entry_price) * 100
-        max_fav    = ((low_after  - entry_price) / entry_price) * 100   # bearish = down is good
+        eod_price = to_scalar(after_entry['Close'].iloc[-1])
+        eod_pct   = ((eod_price - entry_price) / entry_price) * 100
+
+        if stack == 'bearish':
+            low_after = to_scalar(after_entry['Low'].min())
+            max_fav   = ((low_after   - entry_price) / entry_price) * 100
+            win       = eod_pct < 0
+            hit_050   = max_fav <= -0.50
+            hit_075   = max_fav <= -0.75
+            hit_100   = max_fav <= -1.00
+        else:  # bullish
+            high_after = to_scalar(after_entry['High'].max())
+            max_fav    = ((high_after  - entry_price) / entry_price) * 100
+            win        = eod_pct > 0
+            hit_050    = max_fav >= 0.50
+            hit_075    = max_fav >= 0.75
+            hit_100    = max_fav >= 1.00
 
         rejections.append({
             'date'             : date,
+            'stack'            : stack,
             'rejection_found'  : True,
             'rejection_ema'    : rejection_ema,
             'entry_time'       : entry_time,
             'entry_price'      : round(entry_price, 2),
             'max_favorable_pct': round(max_fav, 2),
             'eod_pct'          : round(eod_pct, 2),
-            'trend_continued'  : eod_pct < 0,
-            'hit_050'          : max_fav <= -0.50,
-            'hit_075'          : max_fav <= -0.75,
-            'hit_100'          : max_fav <= -1.00,
+            'trend_continued'  : win,
+            'hit_050'          : hit_050,
+            'hit_075'          : hit_075,
+            'hit_100'          : hit_100,
         })
 
     return pd.DataFrame(rejections)
 
 
 def print_rejection_summary(rej_df):
-    total_bearish = len(rej_df)
-    found = rej_df[rej_df['rejection_found'] == True]
-    n = len(found)
+    total_days  = len(rej_df)
+    found       = rej_df[rej_df['rejection_found'] == True]
+    total_found = len(found)
 
     print("\n" + "="*60)
-    print("EMA REJECTION ENTRY — BEARISH STACK DAYS")
-    print("  Pattern: price touches EMA9/48 from below, closes under it")
-    print("  Entry:   close of rejection bar  |  Target: 0.50-1.00%")
+    print("EMA REJECTION ENTRY — BEARISH + BULLISH STACK DAYS")
+    print("  Bearish: price touches EMA9/48 from below, closes under → short")
+    print("  Bullish: price dips into EMA9/48 from above, closes back over → long")
     print("="*60)
-    print(f"\n  Bearish stack days total:    {total_bearish}")
-    print(f"  Days with rejection found:   {n} ({n/total_bearish*100:.0f}% of bearish days)")
 
-    if n == 0:
-        print("  No rejection signals found.")
-        return
+    # ── Overall frequency ───────────────────────────────────────────────────
+    bear_all   = rej_df[rej_df['stack'] == 'bearish']
+    bull_all   = rej_df[rej_df['stack'] == 'bullish']
+    bear_found = found[found['stack'] == 'bearish']
+    bull_found = found[found['stack'] == 'bullish']
 
-    # EMA breakdown
-    e9_days  = found[found['rejection_ema'] == 'EMA9']
-    e48_days = found[found['rejection_ema'] == 'EMA48']
-    print(f"  → EMA9  rejections:          {len(e9_days)}")
-    print(f"  → EMA48 rejections:          {len(e48_days)}")
+    print(f"\n  ── FREQUENCY (over {total_days} directional stack days) ──")
+    print(f"  Bearish stack days:          {len(bear_all)}  → rejections found: {len(bear_found)} ({len(bear_found)/max(len(bear_all),1)*100:.0f}%)")
+    print(f"  Bullish stack days:          {len(bull_all)}  → rejections found: {len(bull_found)} ({len(bull_found)/max(len(bull_all),1)*100:.0f}%)")
+    print(f"  Total rejection signals:     {total_found} over 60 days  (~{total_found/3:.1f}/week | ~{total_found*4/3:.0f}/month)")
 
-    # Entry time distribution
+    # EMA9 vs EMA48 split across all
+    print(f"\n  EMA9  rejections (all):      {(found['rejection_ema']=='EMA9').sum()}")
+    print(f"  EMA48 rejections (all):      {(found['rejection_ema']=='EMA48').sum()}")
+
     times = pd.to_datetime(found['entry_time'].astype(str))
-    print(f"\n  Avg entry time:              {times.mean().strftime('%H:%M')}")
-    print(f"  Earliest entry:              {times.min().strftime('%H:%M')}")
-    print(f"  Latest entry:                {times.max().strftime('%H:%M')}")
+    print(f"  Avg entry time:              {times.mean().strftime('%H:%M')}")
+    print(f"  Entry time range:            {times.min().strftime('%H:%M')} – {times.max().strftime('%H:%M')}")
 
-    # Win rates
-    wr_eod  = (found['trend_continued'] == True).sum() / n * 100
-    wr_050  = found['hit_050'].sum() / n * 100
-    wr_075  = found['hit_075'].sum() / n * 100
-    wr_100  = found['hit_100'].sum() / n * 100
-    avg_fav = found['max_favorable_pct'].mean()
-    avg_eod = found['eod_pct'].mean()
-
-    print(f"\n  ── Win rates after rejection entry ──")
-    print(f"  EOD direction (closed down):  {wr_eod:.0f}%")
-    print(f"  Hit 0.50% target:             {wr_050:.0f}%")
-    print(f"  Hit 0.75% target:             {wr_075:.0f}%")
-    print(f"  Hit 1.00% target:             {wr_100:.0f}%")
-    print(f"  Avg max favorable move:       {avg_fav:.2f}%")
-    print(f"  Avg EOD move from entry:      {avg_eod:.2f}%")
-
-    # Per-EMA breakdown if enough data
-    for ema_label, subset in [('EMA9', e9_days), ('EMA48', e48_days)]:
-        if len(subset) < 2:
+    # ── Per-stack win rates ──────────────────────────────────────────────────
+    for stack_type, subset, direction in [
+        ('BEARISH (short)', bear_found, 'down'),
+        ('BULLISH (long)',  bull_found, 'up'),
+    ]:
+        if subset.empty:
             continue
-        wr = (subset['hit_050']).sum() / len(subset) * 100
-        print(f"\n  [{ema_label} only]  n={len(subset)}")
-        print(f"    Hit 0.50%: {wr:.0f}%  |  Avg fav: {subset['max_favorable_pct'].mean():.2f}%  |  Avg EOD: {subset['eod_pct'].mean():.2f}%")
+        n = len(subset)
+        e9s  = subset[subset['rejection_ema'] == 'EMA9']
+        e48s = subset[subset['rejection_ema'] == 'EMA48']
 
-    print(f"\n  ── Recent signals ──")
-    cols = ['date','rejection_ema','entry_time','entry_price','max_favorable_pct','eod_pct','trend_continued']
-    print(found[cols].tail(8).to_string(index=False))
+        wr_eod = (subset['trend_continued'] == True).sum() / n * 100
+        wr_050 = subset['hit_050'].sum() / n * 100
+        wr_075 = subset['hit_075'].sum() / n * 100
+        wr_100 = subset['hit_100'].sum() / n * 100
+
+        print(f"\n  ── {stack_type}  (n={n}) ──")
+        print(f"    EOD direction win rate:    {wr_eod:.0f}%")
+        print(f"    Hit 0.50% target:          {wr_050:.0f}%")
+        print(f"    Hit 0.75% target:          {wr_075:.0f}%")
+        print(f"    Hit 1.00% target:          {wr_100:.0f}%")
+        print(f"    Avg max favorable:         {subset['max_favorable_pct'].mean():.2f}%")
+        print(f"    Avg EOD from entry:        {subset['eod_pct'].mean():.2f}%")
+
+        for ema_label, es in [('EMA9', e9s), ('EMA48', e48s)]:
+            if len(es) < 2:
+                continue
+            wr = es['hit_050'].sum() / len(es) * 100
+            print(f"    [{ema_label}] n={len(es)}  Hit 0.50%: {wr:.0f}%  Avg fav: {es['max_favorable_pct'].mean():.2f}%  Avg EOD: {es['eod_pct'].mean():.2f}%")
+
+    # ── Recent signals ───────────────────────────────────────────────────────
+    print(f"\n  ── Recent signals (last 10) ──")
+    cols = ['date','stack','rejection_ema','entry_time','entry_price','max_favorable_pct','eod_pct','trend_continued']
+    print(found[cols].tail(10).to_string(index=False))
     print("="*60)
 
     out_path = "nvda_ema_rejection_results.csv"
