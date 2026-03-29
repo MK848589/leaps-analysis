@@ -133,18 +133,34 @@ def print_summary(results_df):
         print(f"\n── {stack_type.upper()} STACK ({len(subset)} days) ──────────────")
 
         if stack_type != 'neutral':
-            winners    = subset[subset['trend_continued'] == True]
-            win_rate   = len(winners) / len(subset) * 100
-            avg_move   = subset['price_change_pct'].mean()
-            avg_fav    = subset['max_favorable_pct'].mean()
-            avg_unfav  = subset['max_move_up_pct'].mean() if stack_type == 'bearish' else subset['max_move_down_pct'].mean()
+            fav         = subset['max_favorable_pct'].abs()
+            adv         = subset['max_move_up_pct'].abs() if stack_type == 'bearish' else subset['max_move_down_pct'].abs()
+            winners     = subset[subset['trend_continued'] == True]
+            win_rate    = len(winners) / len(subset) * 100
+            avg_move    = subset['price_change_pct'].mean()
+            avg_fav     = subset['max_favorable_pct'].mean()
+            avg_unfav   = subset['max_move_up_pct'].mean() if stack_type == 'bearish' else subset['max_move_down_pct'].mean()
 
-            print(f"  Win rate (trend continued):  {win_rate:.1f}%")
+            # Multi-threshold win rates
+            wr_50  = (fav >= 0.50).sum() / len(subset) * 100
+            wr_75  = (fav >= 0.75).sum() / len(subset) * 100
+            wr_100 = (fav >= 1.00).sum() / len(subset) * 100
+            wr_150 = (fav >= 1.50).sum() / len(subset) * 100
+            wr_rr  = (fav > adv).sum()   / len(subset) * 100   # favorable > adverse
+
+            print(f"  Win rate (EOD direction):    {win_rate:.1f}%")
+            print(f"  Win rate (fav ≥ 0.50%):      {wr_50:.1f}%")
+            print(f"  Win rate (fav ≥ 0.75%):      {wr_75:.1f}%")
+            print(f"  Win rate (fav ≥ 1.00%):      {wr_100:.1f}%")
+            print(f"  Win rate (fav ≥ 1.50%):      {wr_150:.1f}%")
+            print(f"  Win rate (fav > adverse):    {wr_rr:.1f}%")
+            print(f"  ─")
             print(f"  Avg price change by 3:30pm:  {avg_move:.2f}%")
             print(f"  Avg max favorable move:      {avg_fav:.2f}%")
             print(f"  Avg max adverse move:        {avg_unfav:.2f}%")
-            print(f"  Best day:                    {subset['price_change_pct'].min() if stack_type == 'bearish' else subset['price_change_pct'].max():.2f}%")
-            print(f"  Worst day:                   {subset['price_change_pct'].max() if stack_type == 'bearish' else subset['price_change_pct'].min():.2f}%")
+            print(f"  Max single-day favorable:    {fav.max():.2f}%")
+            print(f"  Best EOD:                    {subset['price_change_pct'].min() if stack_type == 'bearish' else subset['price_change_pct'].max():.2f}%")
+            print(f"  Worst EOD:                   {subset['price_change_pct'].max() if stack_type == 'bearish' else subset['price_change_pct'].min():.2f}%")
         else:
             print(f"  Avg price change by 3:30pm:  {subset['price_change_pct'].mean():.2f}%")
 
